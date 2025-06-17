@@ -10,13 +10,13 @@ app = Flask(__name__)
 
 # ---- CONFIGURATION ----
 UPLOAD_FOLDER = 'reference'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # Create folder if not exists
 
 # ---- INITIALIZE FACE ANALYSIS ----
 face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
 face_app.prepare(ctx_id=0, det_size=(640, 640))
 
-# ---- IMAGE UTILITIES ----
+# ---- LOAD IMAGE UTILS ----
 def load_image(path):
     try:
         pil_image = Image.open(path)
@@ -27,13 +27,16 @@ def load_image(path):
         print(f"❌ Error loading image '{path}': {e}")
         return None
 
-def get_embeddings(image):
+def get_embedding(image):
+    # Extract face embeddings using insightface
     faces = face_app.get(image)
     if not faces:
-        return []
-    return [face.embedding / np.linalg.norm(face.embedding) for face in faces]
+        print("❌ No face detected in the image.")
+        return None
+    # Normalize the embedding vector
+    return faces[0].embedding / np.linalg.norm(faces[0].embedding)
 
-# ---- LOAD REFERENCE IMAGES ----
+# ---- LOAD REFERENCE IMAGES ONCE ----
 reference_embeddings = {}
 print("📦 Loading reference images...")
 for filename in os.listdir(UPLOAD_FOLDER):
@@ -44,53 +47,60 @@ for filename in os.listdir(UPLOAD_FOLDER):
         if img is None:
             print(f"❌ Failed to load: {filename}")
             continue
-        embs = get_embeddings(img)
-        if not embs:
+        emb = get_embedding(img)
+        if emb is None:
             print(f"❌ No face found in: {filename}")
             continue
-        reference_embeddings[filename] = embs[0]  # Use the first face
+        reference_embeddings[filename] = emb
         print(f"✅ Loaded and embedded: {filename}")
+
 print("✅ Reference images ready:", list(reference_embeddings.keys()))
 
 # ---- ROUTES ----
 @app.route('/')
 def index():
-    return render_template('capture.html')
+    return render_template('capture.html')  # Directly open camera page
 
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
+        # Get the image from the frontend
         data = request.form['image']
         encoded = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
         live_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        live_embs = get_embeddings(live_image)
-        if not live_embs:
+        print("✅ Live image received and decoded.")
+
+        # Get embedding for the live image
+        live_emb = get_embedding(live_image)
+        if live_emb is None:
             return "❌ No face detected in the captured image."
 
-        results = []
-        threshold = 0.5
+        print(f"✅ Live image embedding: {live_emb}")
 
-        for i, live_emb in enumerate(live_embs):
-            best_score = 0
-            matched_name = "Unknown"
-            for name, ref_emb in reference_embeddings.items():
-                score = np.dot(ref_emb, live_emb)
-                if score > best_score:
-                    best_score = score
-                    matched_name = name
-            if best_score >= threshold:
-                results.append(f"✅ Face {i+1}: {matched_name} (Similarity: {best_score:.4f})")
-            else:
-                results.append(f"❌ Face {i+1}: Unknown (Closest: {matched_name}, Score: {best_score:.4f})")
+        # Compare live embedding with reference embeddings
+        max_score = 0
+        matched_person = "Unknown"
+        threshold = 0.6  # Adjusted threshold
 
-        return "<br>".join(results)
+        for name, ref_emb in reference_embeddings.items():
+            similarity = np.dot(ref_emb, live_emb)
+            print(f"Comparing {name}: Similarity: {similarity:.4f}")
+            if similarity > max_score:
+                max_score = similarity
+                matched_person = name
+
+        if max_score >= threshold:
+            return f"✅ Match found: {matched_person} (Similarity: {max_score:.4f})"
+        else:
+            return f"❌ No match found. Closest: {matched_person} (Score: {max_score:.4f})"
 
     except Exception as e:
+        print(f"❌ Error during verification: {str(e)}")
         return f"❌ Error during verification: {str(e)}"
 
 # ---- RUN APP ----
 if __name__ == '__main__':
-    print("🚀 Starting Face Auth App...")
+    print("🚀 Starting Flask server...")
     app.run(debug=True)
